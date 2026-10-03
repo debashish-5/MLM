@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+pydantic-settings
+numpy
+Pillow
+torch
+open_clip_torch
+faiss-cpu
+pytesseract
+python-dotenv
