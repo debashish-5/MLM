@@ -103,3 +103,114 @@ class HybridRetriever:
             tokenize(r['search_text']) for r in self.records
         ]
         self.bm25 = BM25Okapi(corpus=corpus)
+
+    def search_vector(self,query_vector,top_k = 10): 
+        if self.vector_index is None or not self.records: 
+            return []
+        k = min(top_k, len(self.records))
+        scores, indices = self.vector_index.search(
+            query_vector.astype("float32"), k 
+        )
+        results = []
+        for score, idx in zip(scores[0], indices[0]): 
+            if idx < 0:
+                continue
+            results.append(
+                {
+                    "id":self.records[int(idx)]['id'], 
+                    'score':float(score)
+                }
+            )
+        return results
+
+    def search_keyword(self,query_text, top_k = 10):
+        if not self.bm25 or not self.records: 
+            return []
+        tokens = tokenize(query_text)
+        scores = self.bm25
+        ranked_indices = np.argsort(scores)[::-1][:top_k]
+        return [
+            {
+                "id":self.records[int(idx)]['id'], 
+                'score':float(scores[int(idx)])
+            }
+            for idx in ranked_indices if scores[int(idx)] > 0 
+        ]
+
+    @staticmethod
+    def reciprocal_rank_fusion(result_lists, weights=None, k=60):
+        """
+        result_lists: ordered lists of {id, score} records.
+        RRF uses rank, not the raw retrieval score.
+        """
+        if weights is None:
+            weights = [1.0] * len(result_lists)
+
+        fused_scores = defaultdict(float)
+
+        for weight, results in zip(weights, result_lists):
+            seen = set()
+
+            for rank, result in enumerate(results, start=1):
+                record_id = result["id"]
+
+                # Prevent duplicate contribution within one list.
+                if record_id in seen:
+                    continue
+                seen.add(record_id)
+
+                fused_scores[record_id] += weight / (k + rank)
+
+        return sorted(
+            [
+                {"id": record_id, "fusion_score": score}
+                for record_id, score in fused_scores.items()
+            ],
+            key=lambda x: x["fusion_score"],
+            reverse=True
+        )
+
+    def search(self, text=None, image=None, top_k=5):
+        """
+        Text-only, image-only, or text + image retrieval.
+        """
+        if not text and image is None:
+            raise ValueError("Provide text, image, or both")
+
+        result_lists = []
+        weights = []
+
+        if text and text.strip():
+            result_lists.append(
+                self.search_keyword(text, top_k=20)
+            )
+            weights.append(1.0)
+
+            result_lists.append(
+                self.search_vector(self.encode_text(text), top_k=20)
+            )
+            weights.append(1.0)
+
+        if image is not None:
+            result_lists.append(
+                self.search_vector(self.encode_image(image), top_k=20)
+            )
+            weights.append(1.0)
+
+        fused = self.reciprocal_rank_fusion(
+            result_lists,
+            weights=weights
+        )
+
+        lookup = {r["id"]: r for r in self.records}
+
+        output = []
+        for item in fused[:top_k]:
+            record = lookup[item["id"]]
+
+            output.append({
+                "record": record,
+                "fusion_score": item["fusion_score"]
+            })
+
+        return output
